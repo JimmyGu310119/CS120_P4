@@ -1,0 +1,4 @@
+JUCE/
+*.exe
+build/
+.vs/
