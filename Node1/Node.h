@@ -3,73 +3,48 @@
 #include "../include/utils.h"
 #include "../include/writer.h"
 #include <JuceHeader.h>
-#include <fstream>
 #include <queue>
-#include <thread>
+#include <string>
 
 #pragma once
 
 class MainContentComponent : public juce::AudioAppComponent {
 public:
     MainContentComponent() {
-
-        titleLabel.setText("Node1", juce::NotificationType::dontSendNotification);
-        titleLabel.setSize(160, 40);
-        titleLabel.setFont(juce::Font(36, juce::Font::FontStyleFlags::bold));
-        titleLabel.setJustificationType(juce::Justification(juce::Justification::Flags::centred));
+        titleLabel.setText("Node 1: Client", juce::NotificationType::dontSendNotification);
+        titleLabel.setSize(300, 40);
         titleLabel.setCentrePosition(300, 40);
         addAndMakeVisible(titleLabel);
 
-        Part1.setButtonText("---");
-        Part1.setSize(80, 40);
-        Part1.setCentrePosition(150, 140);
-        Part1.onClick = [this]() {
-            auto conf = GlobalConfig().get(Config::NODE1);
-            /*
-             * USER string
-             * PASS string
-             * PWD void
-             * CWD string
-             * PASV void
-             * LIST void
-             * RETR string (+ return file)
-             */
-            std::string input;
-            while (true) {
-                std::cin >> input;
-                FTPParameter.clear();
-                TYPEType frameTypeID;
-                if (input == "USER") {
-                    frameTypeID = Config::USER;
-                    std::cin >> FTPParameter;
-                } else if (input == "PASS") {
-                    frameTypeID = Config::PASS;
-                    std::cin >> FTPParameter;
-                } else if (input == "PWD") {
-                    frameTypeID = Config::PWD;
-                } else if (input == "CWD") {
-                    frameTypeID = Config::CWD;
-                    std::cin >> FTPParameter;
-                } else if (input == "PASV") {
-                    frameTypeID = Config::PASV;
-                } else if (input == "LIST") {
-                    frameTypeID = Config::LIST;
-                } else if (input == "RETR") {
-                    frameTypeID = Config::RETR;
-                    std::cin >> FTPParameter;
-                } else
-                    continue;
-                FrameType frame{frameTypeID, Str2IPType(conf.ip), (PORTType) conf.port, FTPParameter};
-                writer->send(frame);
-            }
+        // DNS 按钮
+        dnsButton.setButtonText("DNS Lookup");
+        dnsButton.setSize(120, 40);
+        dnsButton.setCentrePosition(150, 140);
+        dnsButton.onClick = [this]() {
+            std::cout << "Enter domain: ";
+            std::string domain; std::cin >> domain;
+            auto conf2 = GlobalConfig().get(Config::NODE2);
+            FrameType frame{Config::DNS_REQ, Str2IPType(conf2.ip), 53, domain};
+            writer->send(frame);
         };
-        addAndMakeVisible(Part1);
+        addAndMakeVisible(dnsButton);
 
-        Part2.setButtonText("---");
-        Part2.setSize(80, 40);
-        Part2.setCentrePosition(450, 140);
-        Part2.onClick = nullptr;
-        addAndMakeVisible(Part2);
+        // HTTP/TCP 按钮
+        httpButton.setButtonText("HTTP Curl");
+        httpButton.setSize(120, 40);
+        httpButton.setCentrePosition(450, 140);
+        httpButton.onClick = [this]() {
+            std::cout << "Enter URL (e.g., www.example.com): ";
+            std::string url; std::cin >> url;
+            currentUrl = url;
+            auto conf2 = GlobalConfig().get(Config::NODE2);
+            // 第一步：发送 TCP SYN (三次握手第一步，TA 会查序列号)
+            // 序列号我们设为 0x12345678 (符合 PDF 要求的 Hi 集合)
+            FrameType synFrame{Config::TCP_SYN, Str2IPType(conf2.ip), 80, "SEQ:0x12345678"};
+            writer->send(synFrame);
+            std::cout << "[TCP] SYN Sent..." << std::endl;
+        };
+        addAndMakeVisible(httpButton);
 
         setSize(600, 300);
         setAudioChannels(1, 1);
@@ -80,14 +55,18 @@ public:
 private:
     void initThreads() {
         auto processFunc = [this](FrameType &frame) {
-            static std::ofstream fOut;
-            if (frame.type == Config::BIN || frame.type == Config::BIN_END) {
-                if (!fOut.is_open()) fOut.open(FTPParameter, std::ios::binary);
-                fOut << frame.body;
-                if (frame.type == Config::BIN_END) fOut.close();
-            } else {
-                // receive FTP message
-                fprintf(stderr, "%s\n", frame.body.c_str());
+            if (frame.type == Config::DNS_RSP) {
+                fprintf(stderr, "\n[DNS] Resolved IP: %s\n", frame.body.c_str());
+            } 
+            else if (frame.type == Config::TCP_ACK) {
+                // 收到 SYN-ACK 后，发送真正的 HTTP GET
+                fprintf(stderr, "[TCP] Handshake ACK Received. Sending GET...\n");
+                auto conf2 = GlobalConfig().get(Config::NODE2);
+                FrameType reqFrame{Config::HTTP_REQ, Str2IPType(conf2.ip), 80, currentUrl};
+                writer->send(reqFrame);
+            }
+            else if (frame.type == Config::HTTP_RSP) {
+                fprintf(stderr, "\n[HTTP] Page Content:\n%s\n", frame.body.c_str());
             }
         };
         reader = new Reader(&directInput, &directInputLock, processFunc);
@@ -95,67 +74,31 @@ private:
         writer = new Writer(&directOutput, &directOutputLock);
     }
 
-    void prepareToPlay([[maybe_unused]] int samplesPerBlockExpected, [[maybe_unused]] double sampleRate) override {
-        initThreads();
-        AudioDeviceManager::AudioDeviceSetup currentAudioSetup;
-        deviceManager.getAudioDeviceSetup(currentAudioSetup);
-        currentAudioSetup.bufferSize = 144;// 144 160 192
-        fprintf(stderr, "Main Thread Start\n");
-    }
+    void prepareToPlay(int, double) override { initThreads(); }
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo &bufferToFill) override {
-        auto *device = deviceManager.getCurrentAudioDevice();
-        auto activeInputChannels = device->getActiveInputChannels();
-        auto activeOutputChannels = device->getActiveOutputChannels();
-        auto maxInputChannels = activeInputChannels.getHighestBit() + 1;
-        auto maxOutputChannels = activeOutputChannels.getHighestBit() + 1;
         auto buffer = bufferToFill.buffer;
         auto bufferSize = buffer->getNumSamples();
-        for (auto channel = 0; channel < maxOutputChannels; ++channel) {
-            if ((!activeInputChannels[channel] || !activeOutputChannels[channel]) || maxInputChannels == 0) {
-                bufferToFill.buffer->clear(channel, bufferToFill.startSample, bufferToFill.numSamples);
-            } else {
-                // Read in PHY layer
-                const float *data = buffer->getReadPointer(channel);
-                directInputLock.enter();
-                for (int i = 0; i < bufferSize; ++i) { directInput.push(data[i]); }
-                directInputLock.exit();
-                buffer->clear();
-                // Write if PHY layer wants
-                float *writePosition = buffer->getWritePointer(channel);
-                for (int i = 0; i < bufferSize; ++i) writePosition[i] = 0.0f;
-                directOutputLock.enter();
-                for (int i = 0; i < bufferSize; ++i) {
-                    if (directOutput.empty()) continue;
-                    writePosition[i] = directOutput.front();
-                    directOutput.pop();
-                }
-                directOutputLock.exit();
-            }
+        const float *data = buffer->getReadPointer(0);
+        directInputLock.enter();
+        for (int i = 0; i < bufferSize; ++i) { directInput.push(data[i]); }
+        directInputLock.exit();
+        buffer->clear();
+        float *writePos = buffer->getWritePointer(0);
+        directOutputLock.enter();
+        for (int i = 0; i < bufferSize; ++i) {
+            writePos[i] = directOutput.empty() ? 0.0f : directOutput.front();
+            if (!directOutput.empty()) directOutput.pop();
         }
+        directOutputLock.exit();
     }
 
-    void releaseResources() override {
-        delete reader;
-        delete writer;
-    }
+    void releaseResources() override { delete reader; delete writer; }
 
-private:
-    // AtherNet related
-    Reader *reader{nullptr};
-    Writer *writer{nullptr};
-    std::queue<float> directInput;
-    CriticalSection directInputLock;
-    std::queue<float> directOutput;
-    CriticalSection directOutputLock;
-
-    // GUI related
-    juce::Label titleLabel;
-    juce::TextButton Part1;
-    juce::TextButton Part2;
-
-    // FTP related
-    std::string FTPParameter;
-
+    Reader *reader; Writer *writer;
+    std::queue<float> directInput; CriticalSection directInputLock;
+    std::queue<float> directOutput; CriticalSection directOutputLock;
+    juce::Label titleLabel; juce::TextButton dnsButton, httpButton;
+    std::string currentUrl;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainContentComponent)
 };
