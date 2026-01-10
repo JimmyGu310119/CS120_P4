@@ -12,9 +12,29 @@ class MainContentComponent : public juce::AudioAppComponent {
 public:
     MainContentComponent() {
         titleLabel.setText("Node 2: Gateway", juce::NotificationType::dontSendNotification);
-        titleLabel.setSize(300, 40);
         titleLabel.setCentrePosition(300, 40);
         addAndMakeVisible(titleLabel);
+
+        // --- 新增：音频设置按钮 ---
+        settingsButton.setButtonText("Audio Settings");
+        settingsButton.setSize(120, 40);
+        settingsButton.setCentrePosition(300, 140); // 放在中间
+        settingsButton.onClick = [this]() {
+            // 弹出 JUCE 自带的音频设置面板
+            juce::DialogWindow::LaunchOptions options;
+            auto* selector = new juce::AudioDeviceSelectorComponent(
+                deviceManager,
+                1, 2, // 至少 1 个输入，2 个输出
+                1, 2,
+                false, false, true, false);
+            selector->setSize(500, 450);
+            options.content.setOwned(selector);
+            options.dialogTitle = "Audio Settings";
+            options.componentToCentreAround = this;
+            options.launchAsync();
+            };
+        addAndMakeVisible(settingsButton);
+
         setSize(600, 300);
         setAudioChannels(1, 1);
     }
@@ -84,5 +104,6 @@ private:
     std::queue<float> directInput; CriticalSection directInputLock;
     std::queue<float> directOutput; CriticalSection directOutputLock;
     juce::Label titleLabel;
+    juce::TextButton settingsButton;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainContentComponent)
 };
