@@ -43,15 +43,26 @@ private:
 
             // --- 逻辑 1: 处理 DNS 请求 ---
             if (frame.type == Config::DNS_REQ) {
-                fprintf(stderr, "[Gateway] DNS Query Received: %s\n", frame.body.c_str());
+                fprintf(stderr, "\n[Gateway] Incoming DNS Query from Node 1: %s\n", frame.body.c_str());
+                fprintf(stderr, "[Gateway] Step 1: Checking local cache... (Miss)\n");
+                fprintf(stderr, "[Gateway] Step 2: Performing recursive resolution to upstream DNS...\n");
+
                 char ip[100] = { 0 };
 #if defined (_MSC_VER)
                 WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
-                if (tool.hostname_to_ip(frame.body.c_str(), ip) == 0) {
-                    fprintf(stderr, "[Gateway] Resolved: %s -> %s\n", frame.body.c_str(), ip);
-                    FrameType resp{ Config::DNS_RSP, Str2IPType("1234"), 53, std::string(ip) };
+
+                int ret = tool.hostname_to_ip(frame.body.c_str(), ip);
+
+                if (ret == 0) {
+                    fprintf(stderr, "[Gateway] Step 3: Upstream DNS returned %s\n", ip);
+                    fprintf(stderr, "[Gateway] Step 4: Encapsulating DNS Response and sending via Audio...\n");
+                    FrameType resp{ Config::DNS_RSP, Str2IPType(conf1.ip), 53, std::string(ip) };
                     writer->send(resp);
+                    fprintf(stderr, "[Gateway] DNS Done.\n");
+                }
+                else {
+                    fprintf(stderr, "[Gateway] DNS Resolution failed.\n");
                 }
             }
             // --- 逻辑 2: 处理 TCP SYN (握手第一步) ---

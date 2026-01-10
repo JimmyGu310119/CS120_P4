@@ -5,63 +5,37 @@
 #include <JuceHeader.h>
 #include <queue>
 #include <string>
+#include <vector>
 
 #pragma once
 
 class MainContentComponent : public juce::AudioAppComponent {
 public:
     MainContentComponent() {
-        titleLabel.setText("Node 1: Client", juce::NotificationType::dontSendNotification);
-        titleLabel.setSize(300, 40);
-        titleLabel.setCentrePosition(300, 40);
+        titleLabel.setText("Aethernet Terminal (Node 1)", juce::NotificationType::dontSendNotification);
+        titleLabel.setSize(400, 30);
+        titleLabel.setCentrePosition(300, 20);
         addAndMakeVisible(titleLabel);
 
-        // DNS 按钮
-        dnsButton.setButtonText("DNS Lookup");
-        dnsButton.setSize(120, 40);
-        dnsButton.setCentrePosition(150, 140);
-        dnsButton.onClick = [this]() {
-            // 使用 JUCE 弹窗输入，解决终端不显示字符的问题
-            auto* aw = new juce::AlertWindow("DNS Lookup", "Enter domain to resolve:", juce::MessageBoxIconType::QuestionIcon);
-            aw->addTextEditor("domain", "www.baidu.com", "Domain:");
-            aw->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
-            aw->addButton("Cancel", 0);
+        // 模拟控制台日志显示区
+        logDisplay.setMultiLine(true);
+        logDisplay.setReadOnly(true);
+        logDisplay.setScrollbarsShown(true);
+        logDisplay.setCaretVisible(false);
+        logDisplay.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
+        logDisplay.setColour(juce::TextEditor::textColourId, juce::Colours::lightgreen);
+        logDisplay.setFont(juce::Font("Consolas", 14.0f, juce::Font::plain));
+        logDisplay.setBounds(20, 50, 560, 180);
+        addAndMakeVisible(logDisplay);
 
-            aw->enterModalState(true, juce::ModalCallbackFunction::create([this, aw](int result) {
-                if (result == 1) { // 用户点了 OK
-                    std::string domain = aw->getTextEditorContents("domain").toStdString();
-                    auto conf2 = GlobalConfig().get(Config::NODE2);
-                    FrameType frame{ Config::DNS_REQ, Str2IPType("10.0.0.2"), 53, domain };
-                    writer->send(frame);
-                    std::cout << "[Sent] DNS Request for " << domain << " sent." << std::endl;
-                }
-                delete aw;
-                }));
-            };
-        addAndMakeVisible(dnsButton);
+        // 模拟终端输入框
+        terminalInput.setReturnKeyStartsNewLine(false);
+        terminalInput.onReturnKey = [this]() { processCommand(); };
+        terminalInput.setBounds(20, 240, 560, 30);
+        terminalInput.setTextToShowWhenEmpty("Enter command (e.g., ping www.baidu.com -n 10)", juce::Colours::grey);
+        addAndMakeVisible(terminalInput);
 
-        // HTTP/TCP 按钮
-        httpButton.setButtonText("HTTP Curl");
-        httpButton.setSize(120, 40);
-        httpButton.setCentrePosition(450, 140);
-        httpButton.onClick = [this]() {
-            auto* aw = new juce::AlertWindow("HTTP Curl", "Enter URL to fetch:", juce::MessageBoxIconType::QuestionIcon);
-            aw->addTextEditor("url", "www.example.com", "URL:");
-            aw->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
-            aw->addButton("Cancel", 0);
-
-            aw->enterModalState(true, juce::ModalCallbackFunction::create([this, aw](int result) {
-                if (result == 1) {
-                    currentUrl = aw->getTextEditorContents("url").toStdString();
-                    auto conf2 = GlobalConfig().get(Config::NODE2);
-                    FrameType synFrame{ Config::TCP_SYN, Str2IPType("10.0.0.2"), 80, "SEQ:0x12345678" };
-                    writer->send(synFrame);
-                    std::cout << "[TCP] SYN Sent for " << currentUrl << std::endl;
-                }
-                delete aw;
-                }));
-            };
-        addAndMakeVisible(httpButton);
+        addLogLine("Aethernet v1.0 initialized. Ready for commands.");
 
         setSize(600, 300);
         setAudioChannels(1, 1);
@@ -70,22 +44,74 @@ public:
     ~MainContentComponent() override { shutdownAudio(); }
 
 private:
+    void addLogLine(const juce::String& line) {
+        juce::MessageManager::callAsync([this, line]() {
+            logDisplay.moveCaretToEnd();
+            logDisplay.insertTextAtCaret(line + juce::newLine);
+            });
+    }
+
+    void processCommand() {
+        juce::String rawCmd = terminalInput.getText().trim();
+        terminalInput.clear();
+        if (rawCmd.isEmpty()) return;
+
+        addLogLine("> " + rawCmd);
+        std::string cmd = rawCmd.toStdString();
+
+        // --- 解析 PING 指令 ---
+        if (cmd.find("ping") == 0) {
+            std::string domain = rawCmd.fromFirstOccurrenceOf("ping ", false, false).upToFirstOccurrenceOf(" ", false, false).toStdString();
+            int count = 1;
+            if (rawCmd.contains("-n")) {
+                count = rawCmd.fromFirstOccurrenceOf("-n ", false, false).getIntValue();
+            }
+            if (count <= 0) count = 1;
+
+            std::thread([this, domain, count]() {
+                auto conf2 = GlobalConfig().get(Config::NODE2);
+                for (int i = 0; i < count; ++i) {
+                    addLogLine(juce::String::formatted("Ping Request %d/%d to %s...", i + 1, count, domain.c_str()));
+                    FrameType frame{ Config::DNS_REQ, Str2IPType(conf2.ip), 53, domain };
+                    writer->send(frame);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2000)); // 等待回包
+                }
+                }).detach();
+        }
+        // --- 解析 CURL 指令 ---
+        else if (cmd.find("curl") == 0) {
+            std::string url = rawCmd.fromFirstOccurrenceOf("http://", false, false).toStdString();
+            if (url.empty()) url = rawCmd.fromFirstOccurrenceOf("curl ", false, false).toStdString();
+
+            std::thread([this, url]() {
+                currentUrl = url;
+                auto conf2 = GlobalConfig().get(Config::NODE2);
+                addLogLine("Initiating TCP Handshake with " + juce::String(url) + "...");
+                // 使用要求的 Initial Sequence Number 0x12345678
+                FrameType synFrame{ Config::TCP_SYN, Str2IPType(conf2.ip), 80, "SEQ:0x12345678" };
+                writer->send(synFrame);
+                }).detach();
+        }
+        else {
+            addLogLine("Unknown command. Use 'ping' or 'curl'.");
+        }
+    }
+
     void initThreads() {
         auto processFunc = [this](FrameType& frame) {
             if (frame.type == Config::DNS_RSP) {
-                // 收到解析结果，直接弹窗显示给 TA 看，更显眼！
-                juce::NativeMessageBox::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "DNS Result", "Resolved IP: " + frame.body);
-                std::cout << "\n[DNS Result] Resolved IP: " << frame.body << std::endl;
+                addLogLine("[DNS] Resolved: " + juce::String(frame.body));
             }
             else if (frame.type == Config::TCP_ACK) {
+                addLogLine("[TCP] Handshake ACK received. Fetching HTTP...");
                 auto conf2 = GlobalConfig().get(Config::NODE2);
-                FrameType reqFrame{ Config::HTTP_REQ, Str2IPType("10.0.0.2"), 80, currentUrl };
+                FrameType reqFrame{ Config::HTTP_REQ, Str2IPType(conf2.ip), 80, currentUrl };
                 writer->send(reqFrame);
             }
             else if (frame.type == Config::HTTP_RSP) {
-                // HTTP 结果太长，打印到控制台，同时弹个小提示
-                juce::NativeMessageBox::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "HTTP Success", "Page content received! See terminal.");
-                std::cout << "\n[HTTP Content]:\n" << frame.body << std::endl;
+                addLogLine("[HTTP Data Received]: " + juce::String(frame.body.substr(0, 40)) + "...");
+                // 收到网页源码弹窗
+                juce::NativeMessageBox::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "HTTP Content", frame.body);
             }
             };
         reader = new Reader(&directInput, &directInputLock, processFunc);
@@ -112,15 +138,12 @@ private:
         directOutputLock.exit();
     }
 
-    void releaseResources() override {
-        if (reader) { reader->stopThread(1000); delete reader; reader = nullptr; }
-        delete writer; writer = nullptr;
-    }
+    void releaseResources() override { if (reader) reader->stopThread(1000); delete reader; delete writer; }
 
-    Reader* reader{ nullptr }; Writer* writer{ nullptr };
+    Reader* reader; Writer* writer;
     std::queue<float> directInput; CriticalSection directInputLock;
     std::queue<float> directOutput; CriticalSection directOutputLock;
-    juce::Label titleLabel; juce::TextButton dnsButton, httpButton;
+    juce::Label titleLabel; juce::TextEditor logDisplay, terminalInput;
     std::string currentUrl;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainContentComponent)
 };
