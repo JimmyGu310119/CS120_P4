@@ -15,18 +15,12 @@ public:
         titleLabel.setCentrePosition(300, 40);
         addAndMakeVisible(titleLabel);
 
-        // --- 新增：音频设置按钮 ---
         settingsButton.setButtonText("Audio Settings");
         settingsButton.setSize(120, 40);
-        settingsButton.setCentrePosition(300, 140); // 放在中间
+        settingsButton.setCentrePosition(300, 140);
         settingsButton.onClick = [this]() {
-            // 弹出 JUCE 自带的音频设置面板
             juce::DialogWindow::LaunchOptions options;
-            auto* selector = new juce::AudioDeviceSelectorComponent(
-                deviceManager,
-                1, 2, // 至少 1 个输入，2 个输出
-                1, 2,
-                false, false, true, false);
+            auto* selector = new juce::AudioDeviceSelectorComponent(deviceManager, 1, 2, 1, 2, false, false, true, false);
             selector->setSize(500, 450);
             options.content.setOwned(selector);
             options.dialogTitle = "Audio Settings";
@@ -43,37 +37,83 @@ public:
 
 private:
     void initThreads() {
-        auto processFunc = [this](FrameType &frame) {
+        auto processFunc = [this](FrameType& frame) {
             socket_t tool;
-            auto conf1 = GlobalConfig().get(Config::NODE1);
+            auto conf1 = GlobalConfig().get(Config::NODE1); // 目标是发回给 Node 1
 
+            // --- 逻辑 1: 处理 DNS 请求 ---
             if (frame.type == Config::DNS_REQ) {
                 fprintf(stderr, "[Gateway] DNS Query Received: %s\n", frame.body.c_str());
                 char ip[100] = { 0 };
-
-                // 补丁：手动初始化一下 Windows Socket 环境，防止 tool 没初始化
 #if defined (_MSC_VER)
-                WSADATA wsaData;
-                WSAStartup(MAKEWORD(2, 2), &wsaData);
+                WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
-
-                int ret = tool.hostname_to_ip(frame.body.c_str(), ip);
-
-                if (ret == 0) {
+                if (tool.hostname_to_ip(frame.body.c_str(), ip) == 0) {
                     fprintf(stderr, "[Gateway] Resolved: %s -> %s\n", frame.body.c_str(), ip);
-                    FrameType resp{ Config::DNS_RSP, Str2IPType(conf1.ip), 53, std::string(ip) };
-                    writer->send(resp);
-                    fprintf(stderr, "[DNS Response] Sent to Node 1.\n");
-                }
-                else {
-                    // 如果失败了，打印错误码
-                    fprintf(stderr, "[Gateway] DNS Error! Return code: %d\n", ret);
-                    // 即使解析失败，我们也回传一个错误信息给 Node 1，防止 Node 1 死等
-                    FrameType resp{ Config::DNS_RSP, Str2IPType(conf1.ip), 53, "Error:0.0.0.0" };
+                    FrameType resp{ Config::DNS_RSP, Str2IPType("1234"), 53, std::string(ip) };
                     writer->send(resp);
                 }
             }
-        };
+            // --- 逻辑 2: 处理 TCP SYN (握手第一步) ---
+            else if (frame.type == Config::TCP_SYN) {
+                fprintf(stderr, "[Gateway] TCP SYN Received (Handshake Part 1): %s\n", frame.body.c_str());
+                // 回复一个 ACK，告诉 Node 1 可以发 HTTP 请求了
+                FrameType ack{ Config::TCP_ACK, Str2IPType("1234"), 80, "ACK:OK" };
+                writer->send(ack);
+                fprintf(stderr, "[Gateway] TCP ACK Sent to Node 1.\n");
+            }
+            // --- 逻辑 3: 处理 HTTP 请求 (抓取网页) ---
+            else if (frame.type == Config::HTTP_REQ) {
+                fprintf(stderr, "[Gateway] HTTP Request Received for: %s\n", frame.body.c_str());
+
+                // 初始化网络环境
+#if defined (_MSC_VER)
+                WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
+                char target_ip[100] = { 0 };
+                socket_t tool;
+
+                // 使用我们修正后的函数解析域名
+                if (tool.hostname_to_ip(frame.body.c_str(), target_ip) == 0) {
+                    fprintf(stderr, "[Gateway] DNS Pre-resolve: %s -> %s\n", frame.body.c_str(), target_ip);
+
+                    tcp_client_t client;
+                    // 注意：www.example.com 有时拦截爬虫，我们也可以试试 http://101.pku.edu.cn
+                    if (client.connect(target_ip, 80) == 0) {
+                        fprintf(stderr, "[Gateway] Connected to remote host at %s\n", target_ip);
+
+                        // 构造请求头（必须包含 User-Agent，防止被服务器拒绝）
+                        std::string httpRequest =
+                            "GET / HTTP/1.1\r\n"
+                            "Host: " + frame.body + "\r\n"
+                            "User-Agent: AetherNet/1.0\r\n"
+                            "Connection: close\r\n\r\n";
+
+                        client.write_all(httpRequest.c_str(), (int)httpRequest.size());
+
+                        // 接收响应
+                        char buf[1024] = { 0 };
+                        int bytesRead = client.read_all(buf, 1023);
+
+                        if (bytesRead > 0) {
+                            fprintf(stderr, "[Gateway] Data fetched (%d bytes). Sending to Node 1...\n", bytesRead);
+                            FrameType httpResp{ Config::HTTP_RSP, Str2IPType("1234"), 80, std::string(buf, bytesRead) };
+                            writer->send(httpResp);
+                        }
+                        else {
+                            fprintf(stderr, "[Gateway] No data received from server.\n");
+                        }
+                    }
+                    else {
+                        fprintf(stderr, "[Gateway] Connect to %s failed.\n", target_ip);
+                    }
+                }
+                else {
+                    fprintf(stderr, "[Gateway] Cannot resolve: %s\n", frame.body.c_str());
+                }
+            }
+            };
         reader = new Reader(&directInput, &directInputLock, processFunc);
         reader->startThread();
         writer = new Writer(&directOutput, &directOutputLock);
@@ -81,15 +121,15 @@ private:
 
     void prepareToPlay(int, double) override { initThreads(); }
 
-    void getNextAudioBlock(const juce::AudioSourceChannelInfo &bufferToFill) override {
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override {
         auto buffer = bufferToFill.buffer;
         auto bufferSize = buffer->getNumSamples();
-        const float *data = buffer->getReadPointer(0);
+        const float* data = buffer->getReadPointer(0);
         directInputLock.enter();
         for (int i = 0; i < bufferSize; ++i) { directInput.push(data[i]); }
         directInputLock.exit();
         buffer->clear();
-        float *writePos = buffer->getWritePointer(0);
+        float* writePos = buffer->getWritePointer(0);
         directOutputLock.enter();
         for (int i = 0; i < bufferSize; ++i) {
             writePos[i] = directOutput.empty() ? 0.0f : directOutput.front();
@@ -100,10 +140,9 @@ private:
 
     void releaseResources() override { delete reader; delete writer; }
 
-    Reader *reader; Writer *writer;
+    Reader* reader{ nullptr }; Writer* writer{ nullptr };
     std::queue<float> directInput; CriticalSection directInputLock;
     std::queue<float> directOutput; CriticalSection directOutputLock;
-    juce::Label titleLabel;
-    juce::TextButton settingsButton;
+    juce::Label titleLabel; juce::TextButton settingsButton;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainContentComponent)
 };

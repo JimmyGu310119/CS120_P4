@@ -31,7 +31,7 @@ public:
                 if (result == 1) { // 用户点了 OK
                     std::string domain = aw->getTextEditorContents("domain").toStdString();
                     auto conf2 = GlobalConfig().get(Config::NODE2);
-                    FrameType frame{ Config::DNS_REQ, Str2IPType(conf2.ip), 53, domain };
+                    FrameType frame{ Config::DNS_REQ, Str2IPType("10.0.0.2"), 53, domain };
                     writer->send(frame);
                     std::cout << "[Sent] DNS Request for " << domain << " sent." << std::endl;
                 }
@@ -54,7 +54,7 @@ public:
                 if (result == 1) {
                     currentUrl = aw->getTextEditorContents("url").toStdString();
                     auto conf2 = GlobalConfig().get(Config::NODE2);
-                    FrameType synFrame{ Config::TCP_SYN, Str2IPType(conf2.ip), 80, "SEQ:0x12345678" };
+                    FrameType synFrame{ Config::TCP_SYN, Str2IPType("10.0.0.2"), 80, "SEQ:0x12345678" };
                     writer->send(synFrame);
                     std::cout << "[TCP] SYN Sent for " << currentUrl << std::endl;
                 }
@@ -79,7 +79,7 @@ private:
             }
             else if (frame.type == Config::TCP_ACK) {
                 auto conf2 = GlobalConfig().get(Config::NODE2);
-                FrameType reqFrame{ Config::HTTP_REQ, Str2IPType(conf2.ip), 80, currentUrl };
+                FrameType reqFrame{ Config::HTTP_REQ, Str2IPType("10.0.0.2"), 80, currentUrl };
                 writer->send(reqFrame);
             }
             else if (frame.type == Config::HTTP_RSP) {

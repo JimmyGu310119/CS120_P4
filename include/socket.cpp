@@ -199,7 +199,7 @@ int socket_t::hostname_to_ip(const char* host_name, char* ip)
   int rv;
 
   memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_UNSPEC;
+  hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
 
