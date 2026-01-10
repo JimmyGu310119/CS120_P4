@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
 
-# 关键修改：加上 VERSION 1.0.0
-project(AetherNet_Project4 VERSION 1.0.0 LANGUAGES CXX)
+# 显式声明支持 C 和 CXX 两种语言
+project(AetherNet_Project4 VERSION 1.0.0 LANGUAGES C CXX)
+
+# 强力开启语言支持（防止生成阶段变量丢失）
+enable_language(C)
+enable_language(CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
