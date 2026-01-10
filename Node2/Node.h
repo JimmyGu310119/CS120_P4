@@ -63,54 +63,46 @@ private:
                 fprintf(stderr, "[Gateway] TCP ACK Sent to Node 1.\n");
             }
             // --- 逻辑 3: 处理 HTTP 请求 (抓取网页) ---
+            // Node2/Node.h 里的 HTTP 处理部分
             else if (frame.type == Config::HTTP_REQ) {
                 fprintf(stderr, "[Gateway] HTTP Request Received for: %s\n", frame.body.c_str());
 
-                // 初始化网络环境
+                char target_ip[100] = { 0 };
+                socket_t tool;
 #if defined (_MSC_VER)
                 WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
 
-                char target_ip[100] = { 0 };
-                socket_t tool;
-
-                // 使用我们修正后的函数解析域名
                 if (tool.hostname_to_ip(frame.body.c_str(), target_ip) == 0) {
-                    fprintf(stderr, "[Gateway] DNS Pre-resolve: %s -> %s\n", frame.body.c_str(), target_ip);
-
                     tcp_client_t client;
-                    // 注意：www.example.com 有时拦截爬虫，我们也可以试试 http://101.pku.edu.cn
                     if (client.connect(target_ip, 80) == 0) {
-                        fprintf(stderr, "[Gateway] Connected to remote host at %s\n", target_ip);
-
-                        // 构造请求头（必须包含 User-Agent，防止被服务器拒绝）
-                        std::string httpRequest =
-                            "GET / HTTP/1.1\r\n"
-                            "Host: " + frame.body + "\r\n"
-                            "User-Agent: AetherNet/1.0\r\n"
-                            "Connection: close\r\n\r\n";
-
+                        std::string httpRequest = "GET / HTTP/1.1\r\nHost: " + frame.body + "\r\nConnection: close\r\n\r\n";
                         client.write_all(httpRequest.c_str(), (int)httpRequest.size());
 
-                        // 接收响应
-                        char buf[1024] = { 0 };
-                        int bytesRead = client.read_all(buf, 1023);
+                        char buf[2048] = { 0 }; // 缓冲区开大一点
+                        int bytesRead = client.read_all(buf, 2047);
 
                         if (bytesRead > 0) {
-                            fprintf(stderr, "[Gateway] Data fetched (%d bytes). Sending to Node 1...\n", bytesRead);
-                            FrameType httpResp{ Config::HTTP_RSP, Str2IPType("1234"), 80, std::string(buf, bytesRead) };
-                            writer->send(httpResp);
-                        }
-                        else {
-                            fprintf(stderr, "[Gateway] No data received from server.\n");
+                            fprintf(stderr, "[Gateway] Total: %d bytes. Starting segmentation...\n", bytesRead);
+
+                            // --- 关键修改：每 100 字节切一刀 ---
+                            int chunkSize = 100;
+                            for (int i = 0; i < bytesRead; i += chunkSize) {
+                                int currentSize = (std::min)(chunkSize, bytesRead - i);
+                                std::string chunkBody(buf + i, currentSize);
+
+                                // 构造小包发送 (IP强制写死为笔记本的 10.0.0.1，确保它能认出来)
+                                FrameType chunkFrame{ Config::HTTP_RSP, Str2IPType("10.0.0.1"), 80, chunkBody };
+                                writer->send(chunkFrame);
+
+                                fprintf(stderr, "[Gateway] Sent Chunk: %d/%d bytes\n", i + currentSize, bytesRead);
+
+                                // 物理层间隔：发完一段停一下，让笔记本喘口气
+                                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                            }
+                            fprintf(stderr, "[Gateway] All segments sent successfully.\n");
                         }
                     }
-                    else {
-                        fprintf(stderr, "[Gateway] Connect to %s failed.\n", target_ip);
-                    }
-                }
-                else {
-                    fprintf(stderr, "[Gateway] Cannot resolve: %s\n", frame.body.c_str());
                 }
             }
             };
