@@ -28,29 +28,28 @@ private:
             auto conf1 = GlobalConfig().get(Config::NODE1);
 
             if (frame.type == Config::DNS_REQ) {
-                fprintf(stderr, "[Gateway] DNS Query: %s\n", frame.body.c_str());
-                char ip[100] = {0};
-                if (tool.hostname_to_ip(frame.body.c_str(), ip) == 0) {
-                    FrameType resp{Config::DNS_RSP, Str2IPType(conf1.ip), 53, std::string(ip)};
+                fprintf(stderr, "[Gateway] DNS Query Received: %s\n", frame.body.c_str());
+                char ip[100] = { 0 };
+
+                // 补丁：手动初始化一下 Windows Socket 环境，防止 tool 没初始化
+#if defined (_MSC_VER)
+                WSADATA wsaData;
+                WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
+                int ret = tool.hostname_to_ip(frame.body.c_str(), ip);
+
+                if (ret == 0) {
+                    fprintf(stderr, "[Gateway] Resolved: %s -> %s\n", frame.body.c_str(), ip);
+                    FrameType resp{ Config::DNS_RSP, Str2IPType(conf1.ip), 53, std::string(ip) };
                     writer->send(resp);
+                    fprintf(stderr, "[DNS Response] Sent to Node 1.\n");
                 }
-            } 
-            else if (frame.type == Config::TCP_SYN) {
-                // 收到 SYN，返回 ACK (完成模拟握手)
-                fprintf(stderr, "[Gateway] TCP SYN Received. Sending ACK...\n");
-                FrameType ack{Config::TCP_ACK, Str2IPType(conf1.ip), 80, "ACK:OK"};
-                writer->send(ack);
-            }
-            else if (frame.type == Config::HTTP_REQ) {
-                // 收到 GET 请求，台式机去真的联网抓取
-                fprintf(stderr, "[Gateway] HTTP Fetching: %s\n", frame.body.c_str());
-                tcp_client_t client;
-                if (client.connect(frame.body.c_str(), 80) == 0) {
-                    std::string getReq = "GET / HTTP/1.1\r\nHost: " + frame.body + "\r\nConnection: close\r\n\r\n";
-                    client.write_all(getReq.c_str(), getReq.size());
-                    char buf[1024] = {0};
-                    int len = client.read_all(buf, 1023); // 抓取网页前 1KB
-                    FrameType resp{Config::HTTP_RSP, Str2IPType(conf1.ip), 80, std::string(buf, len)};
+                else {
+                    // 如果失败了，打印错误码
+                    fprintf(stderr, "[Gateway] DNS Error! Return code: %d\n", ret);
+                    // 即使解析失败，我们也回传一个错误信息给 Node 1，防止 Node 1 死等
+                    FrameType resp{ Config::DNS_RSP, Str2IPType(conf1.ip), 53, "Error:0.0.0.0" };
                     writer->send(resp);
                 }
             }
